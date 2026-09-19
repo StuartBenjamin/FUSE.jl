@@ -64,6 +64,9 @@ LocalPreferences.toml
 #sysimages
 *sysimage.so
 
+# local build (private Pkg depot + sysimage) from fuse_build.sh
+fuse_build_local/
+
 # temp/test files
 test.json
 asd.jl
