@@ -121,7 +121,7 @@ function case_parameters(::Val{:D3D}, shot::Int;
         module purge
         module load omfit
         cd $local_path
-        export PYTHONPATH=$(omas_root):\$PYTHONPATH
+        export PYTHONPATH=$(omas_root)
         """
 
         # Substitute OUTPUT_FILE placeholder with actual path for localhost
@@ -160,7 +160,7 @@ function case_parameters(::Val{:D3D}, shot::Int;
             mkdir -p $remote_path
             cd $remote_path
 
-            export PYTHONPATH=$(omas_root):\$PYTHONPATH
+            export PYTHONPATH=$(omas_root)
 
             $(omfit_block)
 
