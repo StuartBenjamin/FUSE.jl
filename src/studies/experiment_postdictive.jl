@@ -18,7 +18,8 @@ Base.@kwdef mutable struct FUSEparameters__ParametersStudyPostdictive{T<:Real} <
     n_workers::Entry{Int} = study_common_parameters(; n_workers=missing)
     release_workers_after_run::Entry{Bool} = study_common_parameters(; release_workers_after_run=true)
     save_folder::Entry{String} = Entry{String}("-", "Folder to save the postdictive runs into")
-    kw_case_parameters::Entry{Dict{Symbol,Any}} = Entry{Dict{Symbol,Any}}("-", "Keyword arguments passed to case_parameters"; default=Dict{Symbol,Any}())
+    kw_case_parameters::Entry{Dict{Symbol,Any}} = Entry{Dict{Symbol,Any}}("-", "Keyword arguments passed to case_parameters";
+        default=Dict{Symbol,Any}(:EFIT_tree => "EFIT01", :rho_grid => 257, :EFIT_gap_factor => 10.0, :EFIT_hard_gap_s => 0.2))
     redirect_output::Entry{Bool} = Entry{Bool}("-", "Redirect stdout and stderr to log.txt file"; default=true)
     verbose::Entry{Bool} = Entry{Bool}("-", "Turn on verbose progress output"; default=true)
 
@@ -31,9 +32,9 @@ Base.@kwdef mutable struct FUSEparameters__ParametersStudyPostdictive{T<:Real} <
     δt::Entry{Float64} = Entry{Float64}("s", "Macro time step of ActorDynamicPlasma"; default=0.04, check=x -> @assert x > 0 "δt must be > 0")
     δt_exact::Entry{Bool} = Entry{Bool}("-", "Step exactly δt (Nt = floor(Δt / δt)), ending up to one step before end_time; false: the largest step ≤ δt that ends at end_time (Nt = ceil(Δt / δt), FUSE ≤ v1.2.1 with δt = 0.05)"; default=true)
     qed_δt::Entry{Float64} = Entry{Float64}("s", "ActorQED internal time step (sets ActorQED.Nt per macro step; missing: ActorQED.Nt as is, FUSE ≤ v1.2.1)"; default=0.0005, check=x -> @assert x > 0 "qed_δt must be > 0")
-    qmin_desired::Entry{Float64} = Entry{Float64}("-", "ActorQED and ActorSawteethSource qmin_desired"; default=1.0, check=x -> @assert x >= 0 "qmin_desired must be >= 0")
-    sawteeth_period::Entry{Float64} = Entry{Float64}("s", "ActorSawteethSource.period: keep flattening this long after the last sawtooth"; default=0.25)
-    nbi_power_weighted_fractions::Entry{Bool} = Entry{Bool}("-", "DIII-D: beam component fractions power-weighted over the simulated window (false: per-component maximum over the shot)"; default=false)
+    qmin_desired::Entry{Float64} = Entry{Float64}("-", "ActorQED and ActorSawteethSource qmin_desired"; default=1.025, check=x -> @assert x >= 0 "qmin_desired must be >= 0")
+    sawteeth_period::Entry{Float64} = Entry{Float64}("s", "ActorSawteethSource.period: keep flattening this long after the last sawtooth"; default=0.1)
+    nbi_power_weighted_fractions::Entry{Bool} = Entry{Bool}("-", "DIII-D: beam component fractions power-weighted over the simulated window (false: per-component maximum over the shot)"; default=true)
     # DIII-D IDA-lite kinetic profiles
     ida_lite_dir::Entry{String} = Entry{String}("-", "Directory of IDA_<shot>_.cdf files replayed instead of the profile fit where they cover (missing: off)"; default=missing)
     ida_lite_filter_dir::Entry{String} = Entry{String}("-", "Directory of <shot>/ida_lite_filtering_provenance.json, whose bad slices are dropped (missing: none)"; default=missing)
@@ -47,9 +48,33 @@ end
 
 function StudyPostdictive(sty::ParametersStudy; kw...)
     sty = OverrideParameters(sty; kw...)
-    study = StudyPostdictive(sty, unset_parameters!(ParametersActors()))
+    study = StudyPostdictive(sty, postdictive_act_defaults!(unset_parameters!(ParametersActors())))
     parallel_environment(sty.server, sty.n_workers)
     return study
+end
+
+"""
+    postdictive_act_defaults!(act::ParametersActors)
+
+PSFC defaults of `study.act` (bouquet_prep_omega.sh): soft fast-ion cap, per-component NB fast ions and cross sections,
+beam power fractions, NB deposition mirrored on axis, sawteeth flattening of the bootstrap, periodic sawtooth crash,
+psi_norm axis cut 0.005, replay before sources and QED after them
+"""
+function postdictive_act_defaults!(act::ParametersActors)
+    act.ActorSources.fast_density_knee = 0.7
+    act.ActorSimpleNB.fast_ion_components = true
+    act.ActorSimpleNB.component_cross_sections = true
+    act.ActorSimpleNB.power_fractions = :beam_power_fraction
+    act.ActorSimpleNB.axis_mirror = true
+    act.ActorSawteethSource.flatten_bootstrap = true
+    act.ActorQED.crash_period = 0.04
+    act.ActorQED.crash_q = 1.025
+    act.ActorQED.crash_dq = 0.03
+    act.ActorQED.crash_ramp = 0.01
+    act.ActorEquilibrium.psin_cut = 0.005
+    act.ActorDynamicPlasma.replay_before_sources = true
+    act.ActorDynamicPlasma.current_after_sources = true
+    return act
 end
 
 """
