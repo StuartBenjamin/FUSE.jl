@@ -26,6 +26,7 @@ else
     include("runtests_sawteeth_flatten_bootstrap.jl")
     include("runtests_d3d_ida_lite.jl")
     include("runtests_qed_sawtooth_crash.jl")
+    include("runtests_dynamic_plasma_replay_first.jl")
 
     include("runtests_cases.jl")
 
