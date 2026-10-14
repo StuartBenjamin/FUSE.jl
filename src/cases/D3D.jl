@@ -22,7 +22,8 @@
         EFIT_fallback_tree::String="",
         EFIT_gap_factor::Float64=2.0,
         EFIT_hard_gap_s::Float64=0.035,
-        efit_provenance::Union{Nothing,Dict{String,Any}}=nothing
+        efit_provenance::Union{Nothing,Dict{String,Any}}=nothing,
+        rho_grid::Union{Nothing,Int}=nothing
     )
 
 DIII-D from experimental shot
@@ -36,6 +37,8 @@ shot-dependent history of the 150° and 210° beamlines overrides this configura
 `EFIT_fallback_tree` (e.g. "EFIT01") fills interior gaps of `EFIT_tree` wider than `EFIT_gap_factor` times its median
 spacing (or, EFIT02 from EFIT01 only, `>= EFIT_hard_gap_s`) with the fallback tree's slices; `efit_provenance`, if given,
 receives the source tree of each slice (see [`d3d_efit_fallback!`](@ref)).
+
+`rho_grid` sets the number of radial points of the profile fit (`act.ActorFitProfiles.rho_grid`; `nothing` keeps its default).
 """
 function case_parameters(::Val{:D3D}, shot::Int;
     fit_profiles::Bool=true,
@@ -58,9 +61,11 @@ function case_parameters(::Val{:D3D}, shot::Int;
     EFIT_fallback_tree::String="",
     EFIT_gap_factor::Float64=2.0,
     EFIT_hard_gap_s::Float64=0.035,
-    efit_provenance::Union{Nothing,Dict{String,Any}}=nothing
+    efit_provenance::Union{Nothing,Dict{String,Any}}=nothing,
+    rho_grid::Union{Nothing,Int}=nothing
 )
     ini, act = case_parameters(Val(:D3D_machine))
+    rho_grid === nothing || (act.ActorFitProfiles.rho_grid = rho_grid)
     EFIT_tree_name = EFIT_tree # EFIT_tree is rewritten for USERnn trees below
     ini.general.casename = "D3D $shot"
     omfit_host_original = omfit_host
@@ -297,7 +302,7 @@ function case_parameters(::Val{:D3D}, shot::Int;
                 new_impurity_match_power_rad,
                 use_local_cache, use_interferometer,
                 pull_gslite_min, offaxis_beams, counter_beams,
-                EFIT_fallback_tree, EFIT_gap_factor, EFIT_hard_gap_s, efit_provenance)
+                EFIT_fallback_tree, EFIT_gap_factor, EFIT_hard_gap_s, efit_provenance, rho_grid)
         elseif n_cer < 5
             @warn "Shot $shot: only $n_cer CER channels with CERQUICK — falling back to ZIPFIT profiles"
         else
