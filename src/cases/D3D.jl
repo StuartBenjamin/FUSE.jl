@@ -81,6 +81,9 @@ function case_parameters(::Val{:D3D}, shot::Int;
     if !isdir(local_path)
         mkdir(local_path)
     end
+    # with use_local_cache, fetch only if a file that is loaded below is missing
+    fetched_files = pull_gslite_min ? [filename] : [filename, "nbi_ods_$shot.h5"]
+    fetch_data = !use_local_cache || !all(f -> isfile(joinpath(local_path, f)), fetched_files)
 
 
     # to get user EFITs use (shot, USER01) to get (shot01, EFIT)
@@ -136,9 +139,11 @@ function case_parameters(::Val{:D3D}, shot::Int;
         end
         Base.run(`chmod +x $omfit_sh`)
         Base.run(`chmod +x $omas_sh`)
-        task = @async Base.run(`$omfit_sh`)
-        Base.run(`$omas_sh`)
-        wait(task)
+        if fetch_data
+            task = @async Base.run(`$omfit_sh`)
+            Base.run(`$omas_sh`)
+            wait(task)
+        end
     else
         # remote bash/slurm script
         remote_slurm = """#!/bin/bash -l
@@ -197,7 +202,7 @@ function case_parameters(::Val{:D3D}, shot::Int;
         @info("Remote D3D data fetching for shot $shot")
         @info("Path on $omfit_host: $remote_path")
         @info("Path on Localhost: $local_path")
-        if !isfile(joinpath(local_path, filename)) || !use_local_cache
+        if fetch_data
             Base.run(`bash $local_path/local_driver.sh`)
         end
     end
