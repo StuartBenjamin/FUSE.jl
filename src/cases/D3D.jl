@@ -278,7 +278,7 @@ function case_parameters(::Val{:D3D}, shot::Int;
     end
 
     if !isempty(dd1.equilibrium.time_slice)
-        IMAS.flux_surfaces(dd1.equilibrium, IMAS.first_wall(dd1.wall)...)
+        d3d_flux_surfaces_drop_bad!(dd1.equilibrium, IMAS.first_wall(dd1.wall)...)
     end
 
     # set time basis
@@ -505,6 +505,51 @@ function d3d_efit_provenance(dd1::IMAS.DD, primary::AbstractString, fallback::Ab
         "checks" => checks,
         "slice_times" => [ts.time for ts in dd1.equilibrium.time_slice],
         "slice_trees" => collect(String, slice_trees))
+end
+
+"""
+    d3d_flux_surfaces_drop_bad!(eq::IMAS.equilibrium, wall_r::AbstractVector, wall_z::AbstractVector) -> Vector{Float64}
+
+`IMAS.flux_surfaces` slice by slice, dropping the slices it fails on (e.g. no closed boundary in a
+ramp-up EFIT): any run of them at the start or end of the shot, or single ones in between. Two or more
+consecutive failures in between, or every slice failing, rethrow the first error. Returns the dropped times.
+"""
+function d3d_flux_surfaces_drop_bad!(eq::IMAS.equilibrium, wall_r::AbstractVector, wall_z::AbstractVector)
+    n = length(eq.time_slice)
+    errs = Vector{Any}(nothing, n)
+    Threads.@threads for k in 1:n
+        eqt = eq.time_slice[k]
+        findfirst(:rectangular, eqt.profiles_2d) === nothing && continue
+        try
+            IMAS.flux_surfaces(eqt, wall_r, wall_z)
+        catch e
+            errs[k] = e
+        end
+    end
+    bad = findall(!isnothing, errs)
+    isempty(bad) && return Float64[]
+
+    runs = UnitRange{Int}[]
+    for k in bad
+        !isempty(runs) && last(runs[end]) == k - 1 ? (runs[end] = first(runs[end]):k) : push!(runs, k:k)
+    end
+    for run in runs
+        (length(bad) < n && (first(run) == 1 || last(run) == n || length(run) == 1)) || throw(errs[first(run)])
+    end
+
+    t = copy(eq.time)
+    b0 = eq.vacuum_toroidal_field.b0
+    b0_of = length(b0) == n ? Dict(zip(t, b0)) : nothing
+    for k in reverse(bad)
+        deleteat!(eq.time_slice, k)
+    end
+    eq.time = [ts.time for ts in eq.time_slice]
+    b0_of === nothing || (eq.vacuum_toroidal_field.b0 = [b0_of[tk] for tk in eq.time])
+    @warn "flux_surfaces failed on $(length(bad)) of $n equilibrium slice(s), dropped: " *
+          join(("$(round(t[first(r)]; digits=4))" * (length(r) > 1 ? "-$(round(t[last(r)]; digits=4))" : "") * " s" *
+                (first(r) == 1 ? " (start)" : last(r) == n ? " (end)" : "") for r in runs), ", ") *
+          "; first error: $(first(sprint(showerror, errs[bad[1]]), 200))"
+    return t[bad]
 end
 
 """
