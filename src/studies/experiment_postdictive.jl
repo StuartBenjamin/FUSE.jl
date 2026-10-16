@@ -39,6 +39,9 @@ Base.@kwdef mutable struct FUSEparameters__ParametersStudyPostdictive{T<:Real} <
     ida_lite_dir::Entry{String} = Entry{String}("-", "Directory of IDA_<shot>_.cdf files replayed instead of the profile fit where they cover (missing: off)"; default=missing)
     ida_lite_filter_dir::Entry{String} = Entry{String}("-", "Directory of <shot>/ida_lite_filtering_provenance.json, whose bad slices are dropped (missing: none)"; default=missing)
     kw_ida_lite::Entry{Dict{Symbol,Any}} = Entry{Dict{Symbol,Any}}("-", "Keyword arguments passed to apply_ida_lite_profiles!"; default=Dict{Symbol,Any}())
+    drop_bad_time_slices::Entry{Bool} =
+        Entry{Bool}("-", "Drop the experimental time slices that cannot be used, and survive a single failed step of the run, instead of failing the shot " *
+                         "(the case must support `bad_time_slices`, e.g. :D3D); what was dropped and why goes to bad_time_slices.json"; default=false)
 end
 
 mutable struct StudyPostdictive{T<:Real} <: AbstractStudy
@@ -129,7 +132,7 @@ function run_postdictive_case(study::StudyPostdictive, shot::Int; kw_case_parame
             filter_json = ismissing(ida_lite_filter_dir) ? "" : joinpath(ida_lite_filter_dir, string(shot), "ida_lite_filtering_provenance.json")
             bad_times = isfile(filter_json) ? ida_lite_bad_times(filter_json) : Float64[]
             run_postdictive_case(device, shot; savedir, sty.reconstruction, sty.verbose, start_time, end_time, sty.δt, sty.δt_exact, qed_δt,
-                sty.qmin_desired, sty.sawteeth_period, sty.nbi_power_weighted_fractions, act_overrides=study.act, ida_lite_path, ida_lite_bad_times=bad_times, sty.kw_ida_lite, kw_case_parameters)
+                sty.qmin_desired, sty.sawteeth_period, sty.nbi_power_weighted_fractions, act_overrides=study.act, ida_lite_path, ida_lite_bad_times=bad_times, sty.kw_ida_lite, sty.drop_bad_time_slices, kw_case_parameters)
         end
     end
 end
@@ -162,6 +165,7 @@ function run_postdictive_case!(
     ida_lite_path::Union{String,Missing}=missing,
     ida_lite_bad_times::AbstractVector{<:Real}=Float64[],
     kw_ida_lite::Dict{Symbol,Any}=Dict{Symbol,Any}(),
+    drop_bad_time_slices::Bool=false,
     kw_case_parameters::Dict{Symbol,Any}
 )
 
@@ -175,44 +179,50 @@ function run_postdictive_case!(
     @info "StudyPostdictive: case_parameters($(repr(device)), $shot; $(repr(kw_case_parameters))...)"
     # DIII-D: the source tree of each equilibrium slice (case_parameters' EFIT_fallback_tree)
     efit_provenance = device === :D3D ? Dict{String,Any}() : nothing
-    kw_case = efit_provenance === nothing ? kw_case_parameters : merge(kw_case_parameters, Dict{Symbol,Any}(:efit_provenance => efit_provenance))
+    bad_time_slices = drop_bad_time_slices ? BadTimeSlices() : nothing
+    kw_case = merge(kw_case_parameters, Dict{Symbol,Any}(k => v for (k, v) in (:efit_provenance => efit_provenance, :bad_time_slices => bad_time_slices) if v !== nothing))
     ini, act = FUSE.case_parameters(device, shot; kw_case...)
     if !ismissing(start_time)
         ini.time.simulation_start = start_time
     end
 
-    # time window
-    t0 = ini.time.simulation_start # start_time should be early in the shot, when otherwise ohmic current will be wrong
-    final_time = ini.general.dd.equilibrium.time[end]
-    if !ismissing(end_time)
-        final_time = min(end_time, final_time)
-    end
-    Nt = δt_exact ? floor(Int, (final_time - t0) / δt) : ceil(Int, (final_time - t0) / δt)
-    @assert Nt >= 1 "empty time window: simulation start $t0 s, end $final_time s, δt $δt s"
-    Δt = δt_exact ? Nt * δt : final_time - t0
+    # the time window and IDA-lite replay follow the simulation start: with bad_time_slices, a start slice
+    # init! fails on is dropped and they are redone from the next equilibrium slice
+    local t0, final_time, Nt, Δt, ida
+    function prepare()
+        # time window
+        t0 = ini.time.simulation_start # start_time should be early in the shot, when otherwise ohmic current will be wrong
+        final_time = ini.general.dd.equilibrium.time[end]
+        if !ismissing(end_time)
+            final_time = min(end_time, final_time)
+        end
+        Nt = δt_exact ? floor(Int, (final_time - t0) / δt) : ceil(Int, (final_time - t0) / δt)
+        @assert Nt >= 1 "empty time window: simulation start $t0 s, end $final_time s, δt $δt s"
+        Δt = δt_exact ? Nt * δt : final_time - t0
 
-    if nbi_power_weighted_fractions
-        @assert device === :D3D "nbi_power_weighted_fractions is implemented for DIII-D only"
-        d3d_nbi_power_weighted_fractions!(ini, t0, final_time)
-    end
+        if nbi_power_weighted_fractions
+            @assert device === :D3D "nbi_power_weighted_fractions is implemented for DIII-D only"
+            d3d_nbi_power_weighted_fractions!(ini, t0, final_time)
+        end
 
-    # replay IDA-lite profiles where they cover, on a core_profiles time basis with a slice made for every step
-    ida = nothing
-    if !ismissing(ida_lite_path)
-        @assert device === :D3D "IDA-lite profiles are DIII-D only"
-        sim_times = postdictive_instants(t0, Δt, Nt)
-        base = core_profiles_time_base(ini.general.dd.equilibrium.time, ida_lite_time(ida_lite_path), sim_times)
-        # refit as case_parameters did
-        kw_fit = filter(kv -> first(kv) in (:time_averaging, :rho_averaging), kw_case_parameters)
-        reseeded = reseed_core_profiles_time!(ini.general.dd, act, base; kw_fit...) > 0
-        # pairing failures are errors on the reseeded basis (kw_ida_lite may override)
-        kw_ida = merge(Dict{Symbol,Any}(:strict_pairing => reseeded), kw_ida_lite)
-        ida = apply_ida_lite_profiles!(ini.general.dd, ida_lite_path; bad_times=ida_lite_bad_times, sim_times=sim_times[1:2:end], kw_ida...)
+        # replay IDA-lite profiles where they cover, on a core_profiles time basis with a slice made for every step
+        ida = nothing
+        if !ismissing(ida_lite_path)
+            @assert device === :D3D "IDA-lite profiles are DIII-D only"
+            sim_times = postdictive_instants(t0, Δt, Nt)
+            base = core_profiles_time_base(ini.general.dd.equilibrium.time, ida_lite_time(ida_lite_path), sim_times)
+            # refit as case_parameters did
+            kw_fit = filter(kv -> first(kv) in (:time_averaging, :rho_averaging), kw_case_parameters)
+            reseeded = reseed_core_profiles_time!(ini.general.dd, act, base; kw_fit...) > 0
+            # pairing failures are errors on the reseeded basis (kw_ida_lite may override)
+            kw_ida = merge(Dict{Symbol,Any}(:strict_pairing => reseeded), kw_ida_lite)
+            ida = apply_ida_lite_profiles!(ini.general.dd, ida_lite_path; bad_times=ida_lite_bad_times, sim_times=sim_times[1:2:end], kw_ida...)
+        end
     end
-
-    # init
-    @info "StudyPostdictive: ini.time.simulation_start = $(ini.time.simulation_start)"
-    FUSE.init!(dd, ini, act)
+    init_dropping_bad_start!(dd, ini, bad_time_slices; prepare) do
+        @info "StudyPostdictive: ini.time.simulation_start = $(ini.time.simulation_start)"
+        FUSE.init!(dd, ini, act)
+    end
 
     # keep aside the dd with experimental data
     IMAS.fill!(dd_exp, dd)
@@ -312,7 +322,7 @@ function run_postdictive_case!(
     # Run the simulation
     try
         @info "StudyPostdictive: ActorDynamicPlasma(dd, act)"
-        FUSE.ActorDynamicPlasma(dd, act; verbose)
+        FUSE.ActorDynamicPlasma(dd, act; verbose, bad_time_slices)
     catch e
         if isa(e, InterruptException)
             rethrow(e)
@@ -358,6 +368,12 @@ function run_postdictive_case!(
             JSON.print(io, Dict("start" => t0, "δt" => Δt / Nt, "Nt" => Nt, "end" => t0 + Δt, "reached" => dd.global_time), 1)
         end
 
+        if bad_time_slices !== nothing
+            open(joinpath(savedir, "bad_time_slices.json"), "w") do io
+                JSON.print(io, bad_time_slices.records, 1)
+            end
+        end
+
         if save_gif
             @info "StudyPostdictive: save animated gif"
             mkdir(joinpath(savedir, "gif"))
@@ -365,7 +381,7 @@ function run_postdictive_case!(
         end
     end
 
-    return (; act, t0, Δt, Nt, efit_provenance, ida)
+    return (; act, t0, Δt, Nt, efit_provenance, ida, bad_time_slices)
 end
 
 function animated_plasma_overview(dd::IMAS.DD, dir::AbstractString, dd1::Union{IMAS.dd,Nothing}=nothing; aggregate_hcd::Bool=true, fps::Int=12)

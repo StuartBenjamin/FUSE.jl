@@ -27,6 +27,7 @@ else
     include("runtests_d3d_ida_lite.jl")
     include("runtests_qed_sawtooth_crash.jl")
     include("runtests_dynamic_plasma_replay_first.jl")
+    include("runtests_bad_time_slices.jl")
 
     include("runtests_cases.jl")
 
