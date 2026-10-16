@@ -518,13 +518,17 @@ over `eq.time` stops before it goes bad. Fewer than two slices left is an error.
 function d3d_flux_surfaces_drop_bad!(eq::IMAS.equilibrium, wall_r::AbstractVector, wall_z::AbstractVector)
     n = length(eq.time_slice)
     errs = Vector{Any}(nothing, n)
-    Threads.@threads for k in 1:n
+    # in order, not threaded: each slice starts its axis search from the previous slice's axis, so a
+    # failed slice's axis (wherever its search diverged to) is cleared before the next slice reads it
+    for k in 1:n
         eqt = eq.time_slice[k]
         findfirst(:rectangular, eqt.profiles_2d) === nothing && continue
         try
             IMAS.flux_surfaces(eqt, wall_r, wall_z)
         catch e
             errs[k] = e
+            empty!(eqt.global_quantities.magnetic_axis, :r)
+            empty!(eqt.global_quantities.magnetic_axis, :z)
         end
     end
     bad = findall(!isnothing, errs)
