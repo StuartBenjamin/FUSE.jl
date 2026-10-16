@@ -278,7 +278,7 @@ function case_parameters(::Val{:D3D}, shot::Int;
     end
 
     if !isempty(dd1.equilibrium.time_slice)
-        IMAS.flux_surfaces(dd1.equilibrium, IMAS.first_wall(dd1.wall)...)
+        d3d_flux_surfaces_drop_bad!(dd1.equilibrium, IMAS.first_wall(dd1.wall)...)
     end
 
     # set time basis
@@ -505,6 +505,52 @@ function d3d_efit_provenance(dd1::IMAS.DD, primary::AbstractString, fallback::Ab
         "checks" => checks,
         "slice_times" => [ts.time for ts in dd1.equilibrium.time_slice],
         "slice_trees" => collect(String, slice_trees))
+end
+
+"""
+    d3d_flux_surfaces_drop_bad!(eq::IMAS.equilibrium, wall_r::AbstractVector, wall_z::AbstractVector) -> Vector{Float64}
+
+`IMAS.flux_surfaces` slice by slice, dropping the slices it fails on (e.g. no closed boundary in a
+ramp-up EFIT): any run of them at the start or end of the shot and single ones in between. Two or more
+in a row in between end the equilibrium there (they and every later slice are dropped), so a simulation
+over `eq.time` stops before it goes bad. Fewer than two slices left is an error. Returns the dropped times.
+"""
+function d3d_flux_surfaces_drop_bad!(eq::IMAS.equilibrium, wall_r::AbstractVector, wall_z::AbstractVector)
+    n = length(eq.time_slice)
+    errs = Vector{Any}(nothing, n)
+    Threads.@threads for k in 1:n
+        eqt = eq.time_slice[k]
+        findfirst(:rectangular, eqt.profiles_2d) === nothing && continue
+        try
+            IMAS.flux_surfaces(eqt, wall_r, wall_z)
+        catch e
+            errs[k] = e
+        end
+    end
+    bad = findall(!isnothing, errs)
+    isempty(bad) && return Float64[]
+
+    t = [eqt.time for eqt in eq.time_slice]
+    runs = UnitRange{Int}[]
+    for k in bad
+        !isempty(runs) && last(runs[end]) == k - 1 ? (runs[end] = first(runs[end]):k) : push!(runs, k:k)
+    end
+    cut = findfirst(r -> first(r) > 1 && last(r) < n && length(r) > 1, runs)
+    drop = cut === nothing ? bad : vcat(filter(<(first(runs[cut])), bad), first(runs[cut]):n)
+    keep = setdiff(1:n, drop)
+    what = "flux_surfaces failed on $(length(bad)) of $n equilibrium slice(s) at " *
+           join(("$(round(t[first(r)]; digits=4))" * (length(r) > 1 ? "-$(round(t[last(r)]; digits=4))" : "") * " s" *
+                 (first(r) == 1 ? " (start)" : last(r) == n ? " (end)" : "") for r in runs), ", ") *
+           "; first error: $(first(sprint(showerror, errs[bad[1]]), 200))"
+    length(keep) >= 2 || error(what)
+
+    for k in reverse(drop)
+        deleteat!(eq.time_slice, k)
+    end
+    eq.time = t[keep]
+    length(eq.vacuum_toroidal_field.b0) == n && (eq.vacuum_toroidal_field.b0 = eq.vacuum_toroidal_field.b0[keep])
+    @warn what * (cut === nothing ? "; dropped them" : "; dropped them and ended the equilibrium at $(t[keep[end]]) s")
+    return t[drop]
 end
 
 """

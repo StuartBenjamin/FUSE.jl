@@ -23,6 +23,7 @@ else
     include("runtests_simplenb_power_fractions.jl")
     include("runtests_d3d_nbi_fraction_avg.jl")
     include("runtests_d3d_efit_fallback.jl")
+    include("runtests_d3d_flux_surfaces_drop_bad.jl")
     include("runtests_sawteeth_flatten_bootstrap.jl")
     include("runtests_d3d_ida_lite.jl")
     include("runtests_qed_sawtooth_crash.jl")
