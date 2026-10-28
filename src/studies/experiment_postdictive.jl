@@ -148,7 +148,10 @@ function run_postdictive_case!(
 
     # Get case parameters
     @info "StudyPostdictive: case_parameters($(repr(device)), $shot; $(repr(kw_case_parameters))...)"
-    ini, act = FUSE.case_parameters(device, shot; kw_case_parameters...)
+    # DIII-D: the source tree of each equilibrium slice (case_parameters' EFIT_fallback_tree)
+    efit_provenance = device === :D3D ? Dict{String,Any}() : nothing
+    kw_case = efit_provenance === nothing ? kw_case_parameters : merge(kw_case_parameters, Dict{Symbol,Any}(:efit_provenance => efit_provenance))
+    ini, act = FUSE.case_parameters(device, shot; kw_case...)
     if !ismissing(start_time)
         ini.time.simulation_start = start_time
     end
@@ -309,6 +312,12 @@ function run_postdictive_case!(
         @info "StudyPostdictive: save dd_benchmark.json"
         IMAS.imas2json(bnch.dd, joinpath(savedir, "dd_benchmark.json"))
 
+        if efit_provenance !== nothing
+            open(joinpath(savedir, "efit_provenance.json"), "w") do io
+                JSON.print(io, merge(efit_provenance, Dict("checks" => OrderedCollections.OrderedDict(efit_provenance["checks"]))), 1)
+            end
+        end
+
         if ida !== nothing
             open(joinpath(savedir, "ida_provenance.json"), "w") do io
                 JSON.print(io, ida_lite_provenance(ida), 1)
@@ -326,7 +335,7 @@ function run_postdictive_case!(
         end
     end
 
-    return (; act, t0, Δt, Nt, ida)
+    return (; act, t0, Δt, Nt, efit_provenance, ida)
 end
 
 function animated_plasma_overview(dd::IMAS.DD, dir::AbstractString, dd1::Union{IMAS.dd,Nothing}=nothing; aggregate_hcd::Bool=true, fps::Int=12)
