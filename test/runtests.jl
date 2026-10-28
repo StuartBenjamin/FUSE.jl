@@ -21,6 +21,7 @@ else
     include("runtests_simplenb_axis_mirror.jl")
     include("runtests_simplenb_energy_components.jl")
     include("runtests_simplenb_power_fractions.jl")
+    include("runtests_sawteeth_flatten_bootstrap.jl")
 
     include("runtests_cases.jl")
 
