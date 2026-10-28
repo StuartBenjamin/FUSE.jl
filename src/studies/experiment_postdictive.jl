@@ -18,7 +18,8 @@ Base.@kwdef mutable struct FUSEparameters__ParametersStudyPostdictive{T<:Real} <
     n_workers::Entry{Int} = study_common_parameters(; n_workers=missing)
     release_workers_after_run::Entry{Bool} = study_common_parameters(; release_workers_after_run=true)
     save_folder::Entry{String} = Entry{String}("-", "Folder to save the postdictive runs into")
-    kw_case_parameters::Entry{Dict{Symbol,Any}} = Entry{Dict{Symbol,Any}}("-", "Keyword arguments passed to case_parameters"; default=Dict{Symbol,Any}())
+    kw_case_parameters::Entry{Dict{Symbol,Any}} = Entry{Dict{Symbol,Any}}("-", "Keyword arguments passed to case_parameters";
+        default=Dict{Symbol,Any}(:EFIT_tree => "EFIT01", :rho_grid => 257, :EFIT_gap_factor => 10.0, :EFIT_hard_gap_s => 0.2))
     redirect_output::Entry{Bool} = Entry{Bool}("-", "Redirect stdout and stderr to log.txt file"; default=true)
     verbose::Entry{Bool} = Entry{Bool}("-", "Turn on verbose progress output"; default=true)
 
@@ -28,17 +29,20 @@ Base.@kwdef mutable struct FUSEparameters__ParametersStudyPostdictive{T<:Real} <
     reconstruction::Entry{Bool} = Entry{Bool}("-", "Run postdiction in reconstruction mode")
     start_time::Entry{Float64} = Entry{Float64}("s", "Override simulation start time"; default=missing)
     end_time::Entry{Float64} = Entry{Float64}("s", "Simulation end time (missing: end of the equilibrium time basis; later times are clipped to it)"; default=missing)
-    δt::Entry{Float64} = Entry{Float64}("s", "Macro time step of ActorDynamicPlasma (with δt_exact = false, the largest step ≤ δt that ends at end_time)"; default=0.05, check=x -> @assert x > 0 "δt must be > 0")
-    δt_exact::Entry{Bool} = Entry{Bool}("-", "true: steps of exactly δt (Nt = floor(Δt / δt)), ending up to one step before end_time; false: Nt = ceil(Δt / δt) steps that end at end_time"; default=false)
-    qed_δt::Entry{Float64} = Entry{Float64}("s", "ActorQED internal time step (sets ActorQED.Nt per macro step; missing: ActorQED.Nt as is)"; default=missing, check=x -> @assert x > 0 "qed_δt must be > 0")
-    qmin_desired::Entry{Float64} = Entry{Float64}("-", "ActorQED and ActorSawteethSource qmin_desired"; default=1.0, check=x -> @assert x >= 0 "qmin_desired must be >= 0")
-    sawteeth_period::Entry{Float64} = Entry{Float64}("s", "ActorSawteethSource.period: keep flattening this long after the last sawtooth"; default=0.25)
-    nbi_power_weighted_fractions::Entry{Bool} = Entry{Bool}("-", "DIII-D: beam component fractions power-weighted over the simulated window (false: per-component maximum over the shot)"; default=false)
+    δt::Entry{Float64} = Entry{Float64}("s", "Macro time step of ActorDynamicPlasma (with δt_exact = false, the largest step ≤ δt that ends at end_time)"; default=0.04, check=x -> @assert x > 0 "δt must be > 0")
+    δt_exact::Entry{Bool} = Entry{Bool}("-", "true: steps of exactly δt (Nt = floor(Δt / δt)), ending up to one step before end_time; false: Nt = ceil(Δt / δt) steps that end at end_time"; default=true)
+    qed_δt::Entry{Float64} = Entry{Float64}("s", "ActorQED internal time step (sets ActorQED.Nt per macro step; missing: ActorQED.Nt as is)"; default=0.0005, check=x -> @assert x > 0 "qed_δt must be > 0")
+    qmin_desired::Entry{Float64} = Entry{Float64}("-", "ActorQED and ActorSawteethSource qmin_desired"; default=1.025, check=x -> @assert x >= 0 "qmin_desired must be >= 0")
+    sawteeth_period::Entry{Float64} = Entry{Float64}("s", "ActorSawteethSource.period: keep flattening this long after the last sawtooth"; default=0.1)
+    nbi_power_weighted_fractions::Entry{Bool} = Entry{Bool}("-", "DIII-D: beam component fractions power-weighted over the simulated window (false: per-component maximum over the shot)"; default=true)
     # DIII-D IDA-lite kinetic profiles
     ida_lite_dir::Entry{String} = Entry{String}("-", "Directory of IDA_<shot>_.cdf files replayed instead of the profile fit where they cover (missing: off)"; default=missing)
     ida_lite_filter_dir::Entry{String} = Entry{String}("-", "Directory of <shot>/ida_lite_filtering_provenance.json, whose bad slices are dropped (missing: none)"; default=missing)
     ida_lite_allow_zipfit_base::Entry{Bool} = Entry{Bool}("-", "Replay IDA-lite on a shot whose profiles fell back to ZIPFIT (< 5 CER channels) on the ZIPFIT time basis, instead of interpolating them to a slice per step"; default=false)
     kw_ida_lite::Entry{Dict{Symbol,Any}} = Entry{Dict{Symbol,Any}}("-", "Keyword arguments passed to apply_ida_lite_profiles!"; default=Dict{Symbol,Any}())
+    drop_bad_time_slices::Entry{Bool} =
+        Entry{Bool}("-", "Drop the experimental time slices that cannot be used, and survive a single failed step of the run, instead of failing the shot " *
+                         "(the case must support `bad_time_slices`, e.g. :D3D); what was dropped and why goes to bad_time_slices.json"; default=false)
 end
 
 mutable struct StudyPostdictive{T<:Real} <: AbstractStudy
@@ -48,9 +52,33 @@ end
 
 function StudyPostdictive(sty::ParametersStudy; kw...)
     sty = OverrideParameters(sty; kw...)
-    study = StudyPostdictive(sty, unset_parameters!(ParametersActors()))
+    study = StudyPostdictive(sty, postdictive_act_defaults!(unset_parameters!(ParametersActors())))
     parallel_environment(sty.server, sty.n_workers)
     return study
+end
+
+"""
+    postdictive_act_defaults!(act::ParametersActors)
+
+PSFC defaults of `study.act` (bouquet_prep_omega.sh): soft fast-ion cap, per-component NB fast ions and cross sections,
+beam power fractions, NB deposition mirrored on axis, sawteeth flattening of the bootstrap, periodic sawtooth crash,
+psi_norm axis cut 0.005, replay before sources and QED after them
+"""
+function postdictive_act_defaults!(act::ParametersActors)
+    act.ActorSources.fast_density_knee = 0.7
+    act.ActorSimpleNB.fast_ion_components = true
+    act.ActorSimpleNB.component_cross_sections = true
+    act.ActorSimpleNB.power_fractions = :beam_power_fraction
+    act.ActorSimpleNB.axis_mirror = true
+    act.ActorSawteethSource.flatten_bootstrap = true
+    act.ActorQED.crash_period = 0.04
+    act.ActorQED.crash_q = 1.025
+    act.ActorQED.crash_dq = 0.03
+    act.ActorQED.crash_ramp = 0.01
+    act.ActorEquilibrium.psin_cut = 0.005
+    act.ActorDynamicPlasma.replay_before_sources = true
+    act.ActorDynamicPlasma.current_after_sources = true
+    return act
 end
 
 """
@@ -105,7 +133,7 @@ function run_postdictive_case(study::StudyPostdictive, shot::Int; kw_case_parame
             filter_json = ismissing(ida_lite_filter_dir) ? "" : joinpath(ida_lite_filter_dir, string(shot), "ida_lite_filtering_provenance.json")
             bad_times = isfile(filter_json) ? ida_lite_bad_times(filter_json) : Float64[]
             run_postdictive_case(device, shot; savedir, sty.reconstruction, sty.verbose, start_time, end_time, sty.δt, sty.δt_exact, qed_δt,
-                sty.qmin_desired, sty.sawteeth_period, sty.nbi_power_weighted_fractions, act_overrides=study.act, ida_lite_path, ida_lite_bad_times=bad_times, sty.ida_lite_allow_zipfit_base, sty.kw_ida_lite, kw_case_parameters)
+                sty.qmin_desired, sty.sawteeth_period, sty.nbi_power_weighted_fractions, act_overrides=study.act, ida_lite_path, ida_lite_bad_times=bad_times, sty.ida_lite_allow_zipfit_base, sty.kw_ida_lite, sty.drop_bad_time_slices, kw_case_parameters)
         end
     end
 end
@@ -128,9 +156,9 @@ function run_postdictive_case!(
     verbose::Bool,
     start_time::Union{Float64,Missing}=missing,
     end_time::Union{Float64,Missing}=missing,
-    δt::Float64=0.05,
-    δt_exact::Bool=false,
-    qed_δt::Union{Float64,Missing}=missing,
+    δt::Float64=0.04,
+    δt_exact::Bool=true,
+    qed_δt::Union{Float64,Missing}=0.0005,
     qmin_desired::Float64=1.0,
     sawteeth_period::Float64=0.25,
     nbi_power_weighted_fractions::Bool=false,
@@ -139,6 +167,7 @@ function run_postdictive_case!(
     ida_lite_bad_times::AbstractVector{<:Real}=Float64[],
     ida_lite_allow_zipfit_base::Bool=false,
     kw_ida_lite::Dict{Symbol,Any}=Dict{Symbol,Any}(),
+    drop_bad_time_slices::Bool=false,
     kw_case_parameters::Dict{Symbol,Any}
 )
 
@@ -152,44 +181,50 @@ function run_postdictive_case!(
     @info "StudyPostdictive: case_parameters($(repr(device)), $shot; $(repr(kw_case_parameters))...)"
     # DIII-D: the source tree of each equilibrium slice (case_parameters' EFIT_fallback_tree)
     efit_provenance = device === :D3D ? Dict{String,Any}() : nothing
-    kw_case = efit_provenance === nothing ? kw_case_parameters : merge(kw_case_parameters, Dict{Symbol,Any}(:efit_provenance => efit_provenance))
+    bad_time_slices = drop_bad_time_slices ? BadTimeSlices() : nothing
+    kw_case = merge(kw_case_parameters, Dict{Symbol,Any}(k => v for (k, v) in (:efit_provenance => efit_provenance, :bad_time_slices => bad_time_slices) if v !== nothing))
     ini, act = FUSE.case_parameters(device, shot; kw_case...)
     if !ismissing(start_time)
         ini.time.simulation_start = start_time
     end
 
-    # time window
-    t0 = ini.time.simulation_start # start_time should be early in the shot, when otherwise ohmic current will be wrong
-    final_time = ini.general.dd.equilibrium.time[end]
-    if !ismissing(end_time)
-        final_time = min(end_time, final_time)
-    end
-    Nt = δt_exact ? floor(Int, (final_time - t0) / δt) : ceil(Int, (final_time - t0) / δt)
-    @assert Nt >= 1 "empty time window: simulation start $t0 s, end $final_time s, δt $δt s"
-    Δt = δt_exact ? Nt * δt : final_time - t0
+    # the time window and IDA-lite replay follow the simulation start: with bad_time_slices, a start slice
+    # init! fails on is dropped and they are redone from the next equilibrium slice
+    local t0, final_time, Nt, Δt, ida
+    function prepare()
+        # time window
+        t0 = ini.time.simulation_start # start_time should be early in the shot, when otherwise ohmic current will be wrong
+        final_time = ini.general.dd.equilibrium.time[end]
+        if !ismissing(end_time)
+            final_time = min(end_time, final_time)
+        end
+        Nt = δt_exact ? floor(Int, (final_time - t0) / δt) : ceil(Int, (final_time - t0) / δt)
+        @assert Nt >= 1 "empty time window: simulation start $t0 s, end $final_time s, δt $δt s"
+        Δt = δt_exact ? Nt * δt : final_time - t0
 
-    if nbi_power_weighted_fractions
-        @assert device === :D3D "nbi_power_weighted_fractions is implemented for DIII-D only"
-        d3d_nbi_power_weighted_fractions!(ini, t0, final_time)
-    end
+        if nbi_power_weighted_fractions
+            @assert device === :D3D "nbi_power_weighted_fractions is implemented for DIII-D only"
+            d3d_nbi_power_weighted_fractions!(ini, t0, final_time)
+        end
 
-    # replay IDA-lite profiles where they cover, on a core_profiles time basis with a slice made for every step
-    ida = nothing
-    if !ismissing(ida_lite_path)
-        @assert device === :D3D "IDA-lite profiles are DIII-D only"
-        sim_times = postdictive_instants(t0, Δt, Nt)
-        base = core_profiles_time_base(ini.general.dd.equilibrium.time, ida_lite_time(ida_lite_path), sim_times)
-        # refit as case_parameters did
-        kw_fit = filter(kv -> first(kv) in (:time_averaging, :rho_averaging), kw_case_parameters)
-        reseeded = reseed_core_profiles_time!(ini.general.dd, act, base; interpolate_fallback=!ida_lite_allow_zipfit_base, kw_fit...) > 0
-        # pairing failures are errors on the reseeded basis (kw_ida_lite may override)
-        kw_ida = merge(Dict{Symbol,Any}(:strict_pairing => reseeded), kw_ida_lite)
-        ida = apply_ida_lite_profiles!(ini.general.dd, ida_lite_path; bad_times=ida_lite_bad_times, sim_times=sim_times[1:2:end], kw_ida...)
+        # replay IDA-lite profiles where they cover, on a core_profiles time basis with a slice made for every step
+        ida = nothing
+        if !ismissing(ida_lite_path)
+            @assert device === :D3D "IDA-lite profiles are DIII-D only"
+            sim_times = postdictive_instants(t0, Δt, Nt)
+            base = core_profiles_time_base(ini.general.dd.equilibrium.time, ida_lite_time(ida_lite_path), sim_times)
+            # refit as case_parameters did
+            kw_fit = filter(kv -> first(kv) in (:time_averaging, :rho_averaging), kw_case_parameters)
+            reseeded = reseed_core_profiles_time!(ini.general.dd, act, base; interpolate_fallback=!ida_lite_allow_zipfit_base, kw_fit...) > 0
+            # pairing failures are errors on the reseeded basis (kw_ida_lite may override)
+            kw_ida = merge(Dict{Symbol,Any}(:strict_pairing => reseeded), kw_ida_lite)
+            ida = apply_ida_lite_profiles!(ini.general.dd, ida_lite_path; bad_times=ida_lite_bad_times, sim_times=sim_times[1:2:end], kw_ida...)
+        end
     end
-
-    # init
-    @info "StudyPostdictive: ini.time.simulation_start = $(ini.time.simulation_start)"
-    FUSE.init!(dd, ini, act)
+    init_dropping_bad_start!(dd, ini, bad_time_slices; prepare) do
+        @info "StudyPostdictive: ini.time.simulation_start = $(ini.time.simulation_start)"
+        FUSE.init!(dd, ini, act)
+    end
 
     # keep aside the dd with experimental data
     IMAS.fill!(dd_exp, dd)
@@ -289,7 +324,7 @@ function run_postdictive_case!(
     # Run the simulation
     try
         @info "StudyPostdictive: ActorDynamicPlasma(dd, act)"
-        FUSE.ActorDynamicPlasma(dd, act; verbose)
+        FUSE.ActorDynamicPlasma(dd, act; verbose, bad_time_slices)
     catch e
         if isa(e, InterruptException)
             rethrow(e)
@@ -335,6 +370,12 @@ function run_postdictive_case!(
             JSON.print(io, Dict("start" => t0, "δt" => Δt / Nt, "Nt" => Nt, "end" => t0 + Δt, "reached" => dd.global_time), 1)
         end
 
+        if bad_time_slices !== nothing
+            open(joinpath(savedir, "bad_time_slices.json"), "w") do io
+                JSON.print(io, bad_time_slices.records, 1)
+            end
+        end
+
         if save_gif
             @info "StudyPostdictive: save animated gif"
             mkdir(joinpath(savedir, "gif"))
@@ -342,7 +383,7 @@ function run_postdictive_case!(
         end
     end
 
-    return (; act, t0, Δt, Nt, efit_provenance, ida)
+    return (; act, t0, Δt, Nt, efit_provenance, ida, bad_time_slices)
 end
 
 function animated_plasma_overview(dd::IMAS.DD, dir::AbstractString, dd1::Union{IMAS.dd,Nothing}=nothing; aggregate_hcd::Bool=true, fps::Int=12)

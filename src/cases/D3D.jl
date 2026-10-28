@@ -24,7 +24,8 @@
         EFIT_gap_factor::Float64=2.0,
         EFIT_hard_gap_s::Float64=0.035,
         efit_provenance::Union{Nothing,Dict{String,Any}}=nothing,
-        rho_grid::Union{Nothing,Int}=nothing
+        rho_grid::Union{Nothing,Int}=nothing,
+        bad_time_slices::Union{Nothing,BadTimeSlices}=nothing
     )
 
 DIII-D from experimental shot
@@ -47,6 +48,9 @@ spacing (or, EFIT02 from EFIT01 only, `>= EFIT_hard_gap_s`) with the fallback tr
 receives the source tree of each slice (see [`d3d_efit_fallback!`](@ref)).
 
 `rho_grid` sets the number of radial points of the profile fit (`act.ActorFitProfiles.rho_grid`; `nothing` keeps its default).
+
+With `bad_time_slices`, time slices that the equilibrium flux surfaces, the profile fits or the
+pedestal setup fail on are dropped and recorded there instead of failing the case ([`BadTimeSlices`](@ref)).
 """
 function case_parameters(::Val{:D3D}, shot::Int;
     fit_profiles::Bool=true,
@@ -71,7 +75,8 @@ function case_parameters(::Val{:D3D}, shot::Int;
     EFIT_gap_factor::Float64=2.0,
     EFIT_hard_gap_s::Float64=0.035,
     efit_provenance::Union{Nothing,Dict{String,Any}}=nothing,
-    rho_grid::Union{Nothing,Int}=nothing
+    rho_grid::Union{Nothing,Int}=nothing,
+    bad_time_slices::Union{Nothing,BadTimeSlices}=nothing
 )
     ini, act = case_parameters(Val(:D3D_machine))
     EFIT_tree_name = EFIT_tree # EFIT_tree is rewritten for USERnn trees below
@@ -282,7 +287,7 @@ function case_parameters(::Val{:D3D}, shot::Int;
     repair_pf_active_omas_turns!(dd1.pf_active)
 
     if !isempty(dd1.equilibrium.time_slice)
-        IMAS.flux_surfaces(dd1.equilibrium, IMAS.first_wall(dd1.wall)...)
+        flux_surfaces!(dd1, bad_time_slices)
     end
 
     # set time basis
@@ -302,6 +307,7 @@ function case_parameters(::Val{:D3D}, shot::Int;
             dd1.charge_exchange.channel)
         if n_cer < 5 && CER_analysis_type != "CERQUICK"
             @warn "Shot $shot: only $n_cer CER channels with $CER_analysis_type — retrying with CERQUICK"
+            bad_time_slices === nothing || empty!(bad_time_slices.records)
             return case_parameters(Val(:D3D), shot;
                 fit_profiles, EFIT_tree, PROFILES_tree,
                 CER_analysis_type="CERQUICK",
@@ -311,11 +317,11 @@ function case_parameters(::Val{:D3D}, shot::Int;
                 new_impurity_match_power_rad,
                 use_local_cache, use_interferometer,
                 pull_gslite_min, offaxis_beams, counter_beams, data_dir,
-                EFIT_fallback_tree, EFIT_gap_factor, EFIT_hard_gap_s, efit_provenance, rho_grid)
+                EFIT_fallback_tree, EFIT_gap_factor, EFIT_hard_gap_s, efit_provenance, rho_grid, bad_time_slices)
         elseif n_cer < 5
             @warn "Shot $shot: only $n_cer CER channels with CERQUICK — falling back to ZIPFIT profiles"
         else
-            ActorFitProfiles(dd1, act; time_averaging, rho_averaging, time_basis_ids=:equilibrium, use_interferometer)
+            ActorFitProfiles(dd1, act; time_averaging, rho_averaging, time_basis_ids=:equilibrium, use_interferometer, bad_time_slices)
         end
     end
 
@@ -357,7 +363,11 @@ function case_parameters(::Val{:D3D}, shot::Int;
         act.ActorPedestal.density_match = :ne_line
     end
 
-    set_ini_act_from_ods!(ini, act)
+    set_ini_act_from_ods!(ini, act; bad_time_slices)
+    # dropped slices at the start move the simulation start, kept at the second equilibrium slice
+    if bad_time_slices !== nothing && length(dd1.equilibrium.time) >= 2
+        ini.time.simulation_start = max(ini.time.simulation_start, dd1.equilibrium.time[2])
+    end
 
     #### ACT ####
 

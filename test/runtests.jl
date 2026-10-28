@@ -27,6 +27,7 @@ else
     include("runtests_d3d_ida_lite.jl")
     include("runtests_d3d_efit_fallback.jl")
     include("runtests_d3d_nbi_fraction_avg.jl")
+    include("runtests_bad_time_slices.jl")
 
     include("runtests_cases.jl")
 
